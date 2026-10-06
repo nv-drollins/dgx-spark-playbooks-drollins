@@ -58,8 +58,7 @@ ring `B..B+5`, 2-node b2b and switch `B..B+1`.
 - `IP_PREFIX` / `LAST_OCTET_START` / `SUBNET_SIZE` in `spark_cluster_setup.py`
   are dead constants; the real allocation lives in the node script.
 
-The full writeup — including the `git bundle` deploy path for Sparks with no
-internet — is captured as the Hermes skill
+The full writeup is captured as the Hermes skill
 **`dgx-spark-cluster-fabric-networking`** (`mlops/` category).
 
 ## Upstream usage
