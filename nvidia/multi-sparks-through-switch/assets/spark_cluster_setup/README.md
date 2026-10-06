@@ -29,6 +29,30 @@
 > | 3-node ring  | `B` .. `B+5`        | `192.168.10-15.0/24`      |
 > | switch       | `B` .. `B+1`        | `192.168.10-11.0/24`      |
 
+> [!WARNING]
+> **Pitfall: stale NetworkManager connections wipe the fabric IPs.**
+> If a node has previously had its CX7 interfaces touched by NetworkManager,
+> you may find `/etc/netplan/90-NM-<uuid>.yaml` files claiming those same
+> interfaces with `dhcp4: true`. They sort *after* `40-cx7.yaml`, so they
+> override the static fabric addresses and the interfaces come up with no IP
+> (NCCL then fails with "unhandled system error").
+>
+> Detect:
+> ```bash
+> ls /etc/netplan/ | grep 90-NM
+> nmcli -t -f UUID,NAME con show | grep -E 'netplan-(enp1s0|enP2p1)'
+> ```
+>
+> Fix — delete only the CX7 connections, never the management one
+> (`enP7s7` on DGX Spark, which is NM-managed and carries your SSH session):
+> ```bash
+> nmcli -t -f UUID,NAME con show | grep -E 'netplan-(enp1s0|enP2p1)' \
+>   | cut -d: -f1 | xargs -rn1 sudo nmcli con delete
+> sudo rm -f /etc/netplan/90-NM-*.yaml
+> ```
+> Removing the NM connections also deletes `40-cx7.yaml`; just re-run
+> `spark_cluster_setup.sh --run-setup` to regenerate it.
+
 ## Usage
 
 ### Step 1. Clone the repo
