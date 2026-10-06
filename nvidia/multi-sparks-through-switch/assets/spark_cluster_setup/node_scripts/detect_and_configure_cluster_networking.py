@@ -58,6 +58,22 @@ SEND_INTERVAL = 0.5
 DEFAULT_PRIMARY_PORT = 9999
 REPORT_TIMEOUT = 30  # seconds to wait for all nodes to report
 
+# ---------- Cluster fabric addressing ----------
+#
+# The cluster fabric (CX7 200GbE) uses 192.168.<third_octet>.0/24 subnets.
+# Upstream NVIDIA defaults this to third octet 0, which allocates
+# 192.168.0.0/24 .. 192.168.5.0/24 for a 3-node ring. That collides with
+# common copper/management LANs such as 192.168.0.0/24 and 192.168.1.0/24.
+#
+# DEFAULT_BASE_OCTET shifts the whole block upward so a 3-node ring uses
+# 192.168.10.0/24 .. 192.168.15.0/24, well clear of typical home/office LANs.
+# Override at runtime with --base-octet.
+DEFAULT_BASE_OCTET = 10
+
+# A 3-node ring consumes 6 subnets (3 links x 2 subnets per link); switch and
+# 2-node modes consume fewer. Cap so base + span never exceeds octet range.
+MAX_SUBNET_SPAN = 6
+
 
 def get_mac(iface: str) -> str:
     """Return MAC address string (lowercase) for the given interface."""
@@ -249,12 +265,13 @@ def mac_str_to_int(mac_str: str) -> int:
 
 # ---------- IP assignment helpers ----------
 
-def ip_for_2node_link(link_index: int, node_id: int, local_index_in_pair: int) -> str:
+def ip_for_2node_link(link_index: int, node_id: int, local_index_in_pair: int,
+                      base_octet: int = DEFAULT_BASE_OCTET) -> str:
     """
     /24 scheme with 4 hosts per link (2 per node).
 
     For each link_index:
-      network = 192.168.link_index.0/24
+      network = 192.168.(base_octet + link_index).0/24
       hosts .1 .. .4 used for the two nodes (2 endpoints each).
 
     Node 1:
@@ -264,44 +281,52 @@ def ip_for_2node_link(link_index: int, node_id: int, local_index_in_pair: int) -
     Node 2:
       local_index_in_pair = 0 -> .3
       local_index_in_pair = 1 -> .4
+
+    With the default base_octet of 10, link 0 is 192.168.10.0/24.
     """
     host = 1 + (0 if node_id == 1 else 2) + local_index_in_pair
-    return f"192.168.{link_index}.{host}/24"
+    return f"192.168.{base_octet + link_index}.{host}/24"
 
-def ip_for_3node_ring_link(link_index: int, node_id: int, local_index_in_pair: int) -> str:
+def ip_for_3node_ring_link(link_index: int, node_id: int, local_index_in_pair: int,
+                           base_octet: int = DEFAULT_BASE_OCTET) -> str:
     """
     /24 scheme for 3-node ring topology.
 
     For each node_id:
+      third_octet = base_octet + link_index * 2 + local_index_in_pair
       network = 192.168.third_octet.node_id/24
-      third_octet = link_index * 2 + local_index_in_pair
+
+    With the default base_octet of 10:
 
     Node 1:
-      192.168.[0, 1].1/24 -> Node 2
-      192.168.[2, 3].1/24 -> Node 3
+      192.168.[10, 11].1/24 -> Node 2
+      192.168.[12, 13].1/24 -> Node 3
 
     Node 2:
-      192.168.[4, 5].1/24 -> Node 3
-      192.168.[0, 1].2/24 -> Node 1
+      192.168.[14, 15].1/24 -> Node 3
+      192.168.[10, 11].2/24 -> Node 1
 
     Node 3:
-      192.168.[2, 3].2/24 -> Node 1
-      192.168.[4, 5].2/24 -> Node 2
+      192.168.[12, 13].2/24 -> Node 1
+      192.168.[14, 15].2/24 -> Node 2
     """
-    return f"192.168.{link_index * 2 + local_index_in_pair}.{node_id}/24"
+    return f"192.168.{base_octet + link_index * 2 + local_index_in_pair}.{node_id}/24"
 
-def ip_for_switch_link(link_index: int, node_index: int, local_index_in_pair: int) -> str:
+def ip_for_switch_link(link_index: int, node_index: int, local_index_in_pair: int,
+                       base_octet: int = DEFAULT_BASE_OCTET) -> str:
     """
     /24 scheme for N-node switch topology.
 
     For each link_index:
-      network = 192.168.link_index.0/24
+      network = 192.168.(base_octet + link_index).0/24
       host = 10 + node_index * 2 + local_index_in_pair
 
     node_index is 0-based index in sorted cluster_machine_ids.
     local_index_in_pair is 0 for discovery iface, 1 for paired iface.
+
+    With the default base_octet of 10, link 0 is 192.168.10.0/24.
     """
-    base_octet3 = link_index  # 192.168.<link_index>.X
+    base_octet3 = base_octet + link_index  # 192.168.<base+link_index>.X
     host = 10 + node_index * 2 + local_index_in_pair
     return f"192.168.{base_octet3}.{host}/24"
 
@@ -355,7 +380,27 @@ Examples:
         default=False,
         help="Apply netplan YAML"
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--base-octet",
+        type=int,
+        default=DEFAULT_BASE_OCTET,
+        metavar="N",
+        help=(
+            f"Third octet of the first cluster fabric subnet, i.e. 192.168.N.0/24 "
+            f"(default: {DEFAULT_BASE_OCTET}). A 3-node ring consumes N..N+5. "
+            f"Choose a value that does not overlap your management/copper LAN."
+        )
+    )
+    args = parser.parse_args()
+
+    if not 0 <= args.base_octet <= 255 - MAX_SUBNET_SPAN:
+        parser.error(
+            f"--base-octet must be between 0 and {255 - MAX_SUBNET_SPAN} "
+            f"so that the {MAX_SUBNET_SPAN}-subnet block fits in 192.168.0.0/16 "
+            f"(got {args.base_octet})."
+        )
+
+    return args
 
 def apply_netplan_yaml(netplan_yaml) -> bool:
     netplan_path = "/etc/netplan/40-cx7.yaml"
@@ -570,7 +615,7 @@ def main() -> bool:
                 continue
             link_index = SWITCH_IFACE_INDEX.get(discover_iface, 0)
             for local_idx, cfg_iface in enumerate(config_ifaces):
-                ip_cidr = ip_for_switch_link(link_index, node_index, local_idx)
+                ip_cidr = ip_for_switch_link(link_index, node_index, local_idx, args.base_octet)
                 iface_to_ip[cfg_iface] = ip_cidr
             print(
                 f"Switch link for iface {discover_iface}: link_index={link_index}, "
@@ -585,7 +630,7 @@ def main() -> bool:
                 print(f"[{discover_iface}] No mapped config interfaces; skipping IP assignment for this link")
                 continue
             for local_idx, cfg_iface in enumerate(config_ifaces):
-                ip_cidr = ip_for_2node_link(link_index, node_id, local_idx)
+                ip_cidr = ip_for_2node_link(link_index, node_id, local_idx, args.base_octet)
                 iface_to_ip[cfg_iface] = ip_cidr
             print(
                 f"2-node link {link_index}: discover_iface {discover_iface} "
@@ -623,7 +668,7 @@ def main() -> bool:
             node_id_link = 1 if local_machine_id < neighbor_machine else 2
 
             for local_idx, cfg_iface in enumerate(config_ifaces):
-                ip_cidr = ip_for_3node_ring_link(link_index, node_id_link, local_idx)
+                ip_cidr = ip_for_3node_ring_link(link_index, node_id_link, local_idx, args.base_octet)
                 iface_to_ip[cfg_iface] = ip_cidr
 
             print(

@@ -1,22 +1,23 @@
 {
+    "cluster_base_octet": 10,
     "nodes_info": [
         {
-            "ip_address": "NODE_1_MGMT_IP_ADDRESS",
+            "ip_address": "192.168.1.159",
             "port": 22,
-            "user": "user_name",
-            "password": "password"
+            "user": "nvidia",
+            "password": ""
         },
         {
-            "ip_address": "NODE_2_MGMT_IP_ADDRESS",
+            "ip_address": "192.168.1.188",
             "port": 22,
-            "user": "user_name",
-            "password": "password"
+            "user": "nvidia",
+            "password": ""
         },
         {
-            "ip_address": "NODE_3_MGMT_IP_ADDRESS",
+            "ip_address": "192.168.1.124",
             "port": 22,
-            "user": "user_name",
-            "password": "password"
+            "user": "nvidia",
+            "password": ""
         }
     ]
 }

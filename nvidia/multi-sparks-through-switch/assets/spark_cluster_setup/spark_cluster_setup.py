@@ -46,6 +46,18 @@ IDENTITY_LINE = "IdentityFile ~/.ssh/id_ed25519_shared"
 NETWORK_SETUP_SCRIPT_NAME = "detect_and_configure_cluster_networking.py"
 NETWORK_SETUP_SCRIPT = SCRIPT_DIR / "node_scripts" / NETWORK_SETUP_SCRIPT_NAME
 
+# ---------- Cluster fabric addressing ----------
+#
+# The high-speed cluster fabric uses 192.168.<third_octet>.0/24 subnets,
+# starting at DEFAULT_BASE_OCTET and running upward one /24 per link-side.
+# Upstream NVIDIA started at 0 (192.168.0.0/24, 192.168.1.0/24, ...), which
+# collides with typical copper/management LANs. Starting at 10 keeps the
+# fabric clear of 192.168.0.0/24 and 192.168.1.0/24.
+#
+# Override per-cluster with "cluster_base_octet" in the JSON config file.
+DEFAULT_BASE_OCTET = 10
+MAX_SUBNET_SPAN = 6  # a 3-node ring consumes base .. base+5
+
 IP_PREFIX = "192.168.100."
 LAST_OCTET_START = 10
 SUBNET_SIZE = 24
@@ -543,13 +555,13 @@ def run_network_setup_script(node, cmd):
         close_ssh_session(ssh)
         raise Exception(f"Failed to run network setup script on node {node["ip_address"]}:\n{e}")
 
-def run_network_setup_scripts_on_nodes(nodes_info):
+def run_network_setup_scripts_on_nodes(nodes_info, base_octet=DEFAULT_BASE_OCTET):
     """Runs the network setup scripts on the nodes in threads."""
 
     threads = []
     ret = True
     for i, node in enumerate(nodes_info):
-        cmd = f"python3 ~/{NETWORK_SETUP_SCRIPT_NAME} --apply-netplan-yaml"
+        cmd = f"python3 ~/{NETWORK_SETUP_SCRIPT_NAME} --apply-netplan-yaml --base-octet {base_octet}"
         if i == 0:
             cmd = cmd + " --primary"
         t = ExceptionThread(target=run_network_setup_script, args=(node, cmd))
@@ -686,13 +698,18 @@ def handle_cluster_setup(config, up_interfaces) -> bool:
             print("ERROR: Nodes information not found.")
             return False
 
+        base_octet = config.get("cluster_base_octet", DEFAULT_BASE_OCTET)
+
         print(f"Copying network setup scripts on nodes...")
         # Copy the detect_and_configure_cluster_networking.py script to the nodes and run it in threads
         if not copy_network_setup_script_to_nodes(nodes_info):
             return False
 
-        print(f"Running network setup scripts on nodes...")
-        if not run_network_setup_scripts_on_nodes(nodes_info):
+        print(
+            f"Running network setup scripts on nodes "
+            f"(cluster fabric subnets start at 192.168.{base_octet}.0/24)..."
+        )
+        if not run_network_setup_scripts_on_nodes(nodes_info, base_octet):
             print("ERROR: Failed to run network setup scripts on nodes. Check the QSFP cable connections and the nodes config in the json file and try again.")
             return False
 
@@ -734,6 +751,42 @@ def validate_config(config):
     if len(config.get("nodes_info")) < 2 or len(config.get("nodes_info")) > 4:
         print("ERROR: Cluster can not contain less than 2 or more than 4 nodes. Please check the configuration and try again.")
         return False
+
+    # Validate the cluster fabric base octet and make sure the /24 block it
+    # spans does not overlap the management network the nodes are reached on.
+    base_octet = config.get("cluster_base_octet", DEFAULT_BASE_OCTET)
+    if not isinstance(base_octet, int) or isinstance(base_octet, bool):
+        print(f"ERROR: 'cluster_base_octet' must be an integer, got: {base_octet!r}")
+        return False
+
+    if not 0 <= base_octet <= 255 - MAX_SUBNET_SPAN:
+        print(
+            f"ERROR: 'cluster_base_octet' must be between 0 and {255 - MAX_SUBNET_SPAN} "
+            f"so the {MAX_SUBNET_SPAN}-subnet fabric block fits in 192.168.0.0/16 (got {base_octet})."
+        )
+        return False
+
+    fabric_octets = set(range(base_octet, base_octet + MAX_SUBNET_SPAN))
+    for node in config.get("nodes_info", []):
+        mgmt_ip = node.get("ip_address", "")
+        try:
+            mgmt_octets = mgmt_ip.split(".")
+            if mgmt_octets[0] == "192" and mgmt_octets[1] == "168" and int(mgmt_octets[2]) in fabric_octets:
+                print(
+                    f"ERROR: Management IP {mgmt_ip} falls inside the cluster fabric range "
+                    f"192.168.{base_octet}.0/24 .. 192.168.{base_octet + MAX_SUBNET_SPAN - 1}.0/24.\n"
+                    f"       Set 'cluster_base_octet' in the config file to a block that does not "
+                    f"overlap your management/copper network."
+                )
+                return False
+        except (IndexError, ValueError):
+            # Full IP validation happens below; skip the overlap check here.
+            pass
+
+    print(
+        f"Cluster fabric subnets: 192.168.{base_octet}.0/24 .. "
+        f"192.168.{base_octet + MAX_SUBNET_SPAN - 1}.0/24"
+    )
 
     cmd = """ip a | grep -w inet | awk -F"inet |/" '{print $2}' """
     result = subprocess.run(cmd, capture_output=True, text=True, shell=True)

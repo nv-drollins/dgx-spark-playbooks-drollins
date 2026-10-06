@@ -1,5 +1,34 @@
 # Multi spark cluster setup script
 
+> [!IMPORTANT]
+> **Fork note — cluster fabric subnet range.**
+> Upstream NVIDIA allocated the high-speed cluster fabric starting at
+> `192.168.0.0/24`, so a 3-node ring consumed `192.168.0.0/24` through
+> `192.168.5.0/24`. That collides with the most common home/office management
+> LANs (`192.168.0.0/24` and `192.168.1.0/24`) — the fabric steals the subnet
+> your copper network is on and breaks routing to the nodes.
+>
+> This fork starts the fabric at **`192.168.10.0/24`** instead, so a 3-node
+> ring uses `192.168.10.0/24` .. `192.168.15.0/24`.
+>
+> Control it with `"cluster_base_octet"` in your JSON config (default `10`):
+>
+> ```json
+> { "cluster_base_octet": 10, "nodes_info": [ ... ] }
+> ```
+>
+> The setup script now **refuses to run** if the fabric block would overlap
+> the management IPs of any node in the config, instead of silently taking
+> down your network. The node-side script also accepts `--base-octet N`.
+>
+> Subnets consumed per topology (base `B`, default 10):
+>
+> | Topology     | Subnets used        | Default (B=10)            |
+> |--------------|---------------------|---------------------------|
+> | 2-node b2b   | `B` .. `B+1`        | `192.168.10-11.0/24`      |
+> | 3-node ring  | `B` .. `B+5`        | `192.168.10-15.0/24`      |
+> | switch       | `B` .. `B+1`        | `192.168.10-11.0/24`      |
+
 ## Usage
 
 ### Step 1. Clone the repo
