@@ -1,59 +1,68 @@
 # Multi spark cluster setup script
 
-> [!IMPORTANT]
-> **Fork note — cluster fabric subnet range.**
-> Upstream NVIDIA allocated the high-speed cluster fabric starting at
-> `192.168.0.0/24`, so a 3-node ring consumed `192.168.0.0/24` through
-> `192.168.5.0/24`. That collides with the most common home/office management
-> LANs (`192.168.0.0/24` and `192.168.1.0/24`) — the fabric steals the subnet
-> your copper network is on and breaks routing to the nodes.
->
-> This fork starts the fabric at **`192.168.10.0/24`** instead, so a 3-node
-> ring uses `192.168.10.0/24` .. `192.168.15.0/24`.
->
-> Control it with `"cluster_base_octet"` in your JSON config (default `10`):
->
-> ```json
-> { "cluster_base_octet": 10, "nodes_info": [ ... ] }
-> ```
->
-> The setup script now **refuses to run** if the fabric block would overlap
-> the management IPs of any node in the config, instead of silently taking
-> down your network. The node-side script also accepts `--base-octet N`.
->
-> Subnets consumed per topology (base `B`, default 10):
->
-> | Topology     | Subnets used        | Default (B=10)            |
-> |--------------|---------------------|---------------------------|
-> | 2-node b2b   | `B` .. `B+1`        | `192.168.10-11.0/24`      |
-> | 3-node ring  | `B` .. `B+5`        | `192.168.10-15.0/24`      |
-> | switch       | `B` .. `B+1`        | `192.168.10-11.0/24`      |
+> **Fork of [NVIDIA/dgx-spark-playbooks](https://github.com/NVIDIA/dgx-spark-playbooks).**
+> Upstream put the CX7 fabric on `192.168.0-5.0/24`, which collides with the
+> usual `192.168.0.0/24` / `192.168.1.0/24` office LAN. This fork starts it at
+> **`192.168.10.0/24`** and refuses to run if the block would overlap your
+> management network. Verified on a 3-node ring: **22.66 GB/s** NCCL bus bandwidth.
+
+```json
+// config/spark_config_ring.json -- default 10, ring consumes B..B+5
+{ "cluster_base_octet": 10, "nodes_info": [ ... ] }
+```
+
+```bash
+bash spark_cluster_setup.sh -c config/spark_config_ring.json --run-setup
+```
+
+Node-side equivalent: `--base-octet N`. Subnets consumed from base `B`:
+ring `B..B+5`, 2-node b2b and switch `B..B+1`.
 
 > [!WARNING]
-> **Pitfall: stale NetworkManager connections wipe the fabric IPs.**
-> If a node has previously had its CX7 interfaces touched by NetworkManager,
-> you may find `/etc/netplan/90-NM-<uuid>.yaml` files claiming those same
-> interfaces with `dhcp4: true`. They sort *after* `40-cx7.yaml`, so they
-> override the static fabric addresses and the interfaces come up with no IP
-> (NCCL then fails with "unhandled system error").
+> **Stale NetworkManager connections silently wipe the fabric IPs.**
+> If a node's CX7 interfaces were ever touched by NetworkManager, you get
+> `/etc/netplan/90-NM-<uuid>.yaml` files claiming them with `dhcp4: true`.
+> They sort *after* `40-cx7.yaml` and override the static addresses, so the
+> interfaces come up with **no IP** and NCCL fails with `unhandled system
+> error`. Setup still reports success — the IPs were assigned, then removed.
+> Tell-tale: one node has an empty IP column while its peers are fine.
 >
-> Detect:
 > ```bash
+> # detect
 > ls /etc/netplan/ | grep 90-NM
 > nmcli -t -f UUID,NAME con show | grep -E 'netplan-(enp1s0|enP2p1)'
-> ```
 >
-> Fix — delete only the CX7 connections, never the management one
-> (`enP7s7` on DGX Spark, which is NM-managed and carries your SSH session):
-> ```bash
+> # fix -- CX7 connections ONLY, never enP7s7 (that is your SSH session)
 > nmcli -t -f UUID,NAME con show | grep -E 'netplan-(enp1s0|enP2p1)' \
 >   | cut -d: -f1 | xargs -rn1 sudo nmcli con delete
 > sudo rm -f /etc/netplan/90-NM-*.yaml
 > ```
-> Removing the NM connections also deletes `40-cx7.yaml`; just re-run
-> `spark_cluster_setup.sh --run-setup` to regenerate it.
+>
+> This also deletes `40-cx7.yaml` — expected. Re-run `--run-setup` to
+> regenerate it; don't hand-write it, the generator derives addresses from
+> live MAC ordering.
 
-## Usage
+### Notes
+
+- Run from a node **in** the cluster, via the `.sh` wrapper (it sets the
+  env var the Python script checks for).
+- Full `--run-setup` takes ~8–12 min (20 s L2 discovery per node, then an
+  NCCL build). Use `nohup ... &` and poll the log; a foreground SSH call
+  will time out.
+- In a ring, some node pairs *cannot* ping each other — each node only has
+  interfaces on its two links. That is correct. The real check is NCCL bus
+  bandwidth (`10 GB/s` ring floor, `21.875 GB/s` b2b/switch).
+- Keep `"password"` empty in committed configs; set it locally only.
+- Needs Python ≥3.12 — upstream uses PEP 701 nested f-string quotes, which
+  older parsers misreport as `SyntaxError: f-string: unmatched '['`.
+- `IP_PREFIX` / `LAST_OCTET_START` / `SUBNET_SIZE` in `spark_cluster_setup.py`
+  are dead constants; the real allocation lives in the node script.
+
+The full writeup — including the `git bundle` deploy path for Sparks with no
+internet — is captured as the Hermes skill
+**`dgx-spark-cluster-fabric-networking`** (`mlops/` category).
+
+## Upstream usage
 
 ### Step 1. Clone the repo
 
